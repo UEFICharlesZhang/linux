@@ -598,6 +598,7 @@ static irqreturn_t i8042_interrupt(int irq, void *dev_id)
 		serio_interrupt(serio, data, dfl);
 
  out:
+	writel(0x0,kbd_iobase + 0x7FFFFF0);
 	return IRQ_RETVAL(ret);
 }
 
