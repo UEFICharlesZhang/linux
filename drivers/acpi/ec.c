@@ -271,10 +271,11 @@ static bool acpi_ec_flushed(struct acpi_ec *ec)
 /* --------------------------------------------------------------------------
  *                           EC Registers
  * -------------------------------------------------------------------------- */
-
+static void __iomem *lpc_iobase;
 static inline u8 acpi_ec_read_status(struct acpi_ec *ec)
 {
-	u8 x = inb(ec->command_addr);
+	// u8 x = inb(ec->command_addr);
+	u8 x = readb(lpc_iobase + ec->command_addr);
 
 	ec_dbg_raw("EC_SC(R) = 0x%2.2x "
 		   "SCI_EVT=%d BURST=%d CMD=%d IBF=%d OBF=%d",
@@ -289,8 +290,9 @@ static inline u8 acpi_ec_read_status(struct acpi_ec *ec)
 
 static inline u8 acpi_ec_read_data(struct acpi_ec *ec)
 {
-	u8 x = inb(ec->data_addr);
-
+	//CHARLES don't use inb
+	// u8 x = inb(ec->data_addr);
+    u8 x = readb(lpc_iobase + ec->data_addr);
 	ec->timestamp = jiffies;
 	ec_dbg_raw("EC_DATA(R) = 0x%2.2x", x);
 	return x;
@@ -298,15 +300,19 @@ static inline u8 acpi_ec_read_data(struct acpi_ec *ec)
 
 static inline void acpi_ec_write_cmd(struct acpi_ec *ec, u8 command)
 {
+	//CHARLES don't use inb
 	ec_dbg_raw("EC_SC(W) = 0x%2.2x", command);
-	outb(command, ec->command_addr);
+	// outb(command, ec->command_addr);
+	writeb(command, lpc_iobase + ec->command_addr);
 	ec->timestamp = jiffies;
 }
 
 static inline void acpi_ec_write_data(struct acpi_ec *ec, u8 data)
 {
+	//CHARLES don't use inb
 	ec_dbg_raw("EC_DATA(W) = 0x%2.2x", data);
-	outb(data, ec->data_addr);
+	// outb(data, ec->data_addr);
+	writeb(data, lpc_iobase + ec->data_addr);
 	ec->timestamp = jiffies;
 }
 
@@ -1683,6 +1689,9 @@ ec_parse_io_ports(struct acpi_resource *resource, void *context)
 	 * the second address region returned is the status/command
 	 * port.
 	 */
+	//CHARLES later modify io here, need to modify io r/w function
+	lpc_iobase = ioremap(0x20000000, 0x100);
+
 	if (ec->data_addr == 0)
 		ec->data_addr = resource->data.io.minimum;
 	else if (ec->command_addr == 0)
