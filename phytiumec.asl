@@ -34,11 +34,9 @@
                 IO(Decode16, 0x62, 0x62, 0, 1)
                 IO(Decode16, 0x66, 0x66, 0, 1)
 
-                /* For HW-Reduced ACPI Platforms, include a GPIO Interrupt Connection resource */
-                GpioInt (Edge, ActiveLow, ExclusiveAndWake, PullUp, 0x0000,
-                        "\\_SB.GPI0", 0x00, ResourceConsumer, ,)
+                Interrupt (ResourceConsumer, Level, ActiveHigh, Exclusive, ,, )
                 {
-                        0x07
+                    0x0000002a,
                 }
 
                 Memory32Fixed (ReadWrite,

@@ -29,6 +29,7 @@
 #include <linux/acpi.h>
 #include <linux/dmi.h>
 #include <asm/io.h>
+#include <linux/ioport.h>
 
 #include "internal.h"
 
@@ -272,6 +273,7 @@ static bool acpi_ec_flushed(struct acpi_ec *ec)
  *                           EC Registers
  * -------------------------------------------------------------------------- */
 static void __iomem *lpc_iobase;
+static void __iomem *gpio_iobase;
 static inline u8 acpi_ec_read_status(struct acpi_ec *ec)
 {
 	// u8 x = inb(ec->command_addr);
@@ -1278,7 +1280,15 @@ static u32 acpi_ec_gpe_handler(acpi_handle gpe_device,
 
 static irqreturn_t acpi_ec_irq_handler(int irq, void *data)
 {
+	printk("[%s] :%d, irq :%d\n",__func__, __LINE__, irq);
+	//read and confirm if this is a interrupt from gpio 7.
+	if(readl(gpio_iobase + 0x28)&BIT(7))
+		{
+		printk("[%s] :%d, recieve an SCI\n",__func__, __LINE__);
 	acpi_ec_handle_interrupt(data);
+		// clear sci.
+		writel(BIT(7),gpio_iobase + 0x38);
+		}
 	return IRQ_HANDLED;
 }
 
@@ -1440,7 +1450,19 @@ static bool install_gpio_irq_event_handler(struct acpi_ec *ec)
 	return request_irq(ec->irq, acpi_ec_irq_handler, IRQF_SHARED,
 			   "ACPI EC", ec) >= 0;
 }
+static acpi_status ec_irq_walk_resources(struct acpi_resource *resource, void *context)
+{
+	struct acpi_ec *ec = context;
 
+	switch (resource->type) {
+	case ACPI_RESOURCE_TYPE_EXTENDED_IRQ:
+		ec->irq = acpi_register_gsi(NULL, resource->data.extended_irq.interrupts[0],
+		resource->data.extended_irq.triggering, resource->data.extended_irq.polarity);
+		return AE_OK;
+	default:
+		return AE_ERROR;
+	}
+}
 /**
  * ec_install_handlers - Install service callbacks and register query methods.
  * @ec: Target EC.
@@ -1481,15 +1503,19 @@ static int ec_install_handlers(struct acpi_ec *ec, struct acpi_device *device)
 
 	if (ec->gpe < 0) {
 		/* ACPI reduced hardware platforms use a GpioInt from _CRS. */
-		int irq = acpi_dev_gpio_irq_get(device, 0);
+		// int irq = acpi_dev_gpio_irq_get(device, 0);
 		/*
 		 * Bail out right away for deferred probing or complete the
 		 * initialization regardless of any other errors.
 		 */
-		if (irq == -EPROBE_DEFER)
-			return -EPROBE_DEFER;
-		else if (irq >= 0)
-			ec->irq = irq;
+		// if (irq == -EPROBE_DEFER)
+		// 	return -EPROBE_DEFER;
+		// else if (irq >= 0)
+		// 	ec->irq = irq;
+		// Charles: for phytium didn't provide gpio int support, we use GPIO's interrupt as a temperary solution.
+		status = acpi_walk_resources(device->handle, METHOD_NAME__CRS,
+				     ec_irq_walk_resources, ec);
+		printk("[%s] :%d, acpi irq :%d\n",__func__, __LINE__, ec->irq);
 	}
 
 	if (!test_bit(EC_FLAGS_QUERY_METHODS_INSTALLED, &ec->flags)) {
@@ -1690,7 +1716,9 @@ ec_parse_io_ports(struct acpi_resource *resource, void *context)
 	 * port.
 	 */
 	//CHARLES later modify io here, need to modify io r/w function
+	//lpc for communication, gpio for interrupt
 	lpc_iobase = ioremap(0x20000000, 0x100);
+	gpio_iobase = ioremap(0x28004000, 0x100);
 
 	if (ec->data_addr == 0)
 		ec->data_addr = resource->data.io.minimum;
