@@ -1454,14 +1454,13 @@ static acpi_status ec_irq_walk_resources(struct acpi_resource *resource, void *c
 {
 	struct acpi_ec *ec = context;
 
-	switch (resource->type) {
-	case ACPI_RESOURCE_TYPE_EXTENDED_IRQ:
+	if (resource->type == ACPI_RESOURCE_TYPE_EXTENDED_IRQ) {
+		printk("[%s] :%d, found irq :%d\n",__func__, __LINE__, resource->data.extended_irq.interrupts[0]);
 		ec->irq = acpi_register_gsi(NULL, resource->data.extended_irq.interrupts[0],
 		resource->data.extended_irq.triggering, resource->data.extended_irq.polarity);
-		return AE_OK;
-	default:
-		return AE_ERROR;
+		return AE_CTRL_TERMINATE;
 	}
+	return AE_OK;
 }
 /**
  * ec_install_handlers - Install service callbacks and register query methods.
