@@ -227,7 +227,7 @@ static int ringbuf_process_ring(struct ring* r)
 			if ((len & BPF_RINGBUF_DISCARD_BIT) == 0) {
 				sample = (void *)len_ptr + BPF_RINGBUF_HDR_SZ;
 				err = r->sample_cb(r->ctx, sample, len);
-				if (err) {
+				if (err < 0) {
 					/* update consumer pos and bail out */
 					smp_store_release(r->consumer_pos,
 							  cons_pos);
@@ -278,7 +278,13 @@ int ring_buffer__poll(struct ring_buffer *rb, int timeout_ms)
 		err = ringbuf_process_ring(ring);
 		if (err < 0)
 			return err;
-		res += cnt;
+		res += err;
 	}
 	return cnt < 0 ? -errno : res;
+}
+
+/* Get an fd that can be used to sleep until data is available in the ring(s) */
+int ring_buffer__epoll_fd(const struct ring_buffer *rb)
+{
+	return rb->epoll_fd;
 }

@@ -171,8 +171,13 @@ static void __qrtr_node_release(struct kref *kref)
 	void __rcu **slot;
 
 	spin_lock_irqsave(&qrtr_nodes_lock, flags);
-	if (node->nid != QRTR_EP_NID_AUTO)
-		radix_tree_delete(&qrtr_nodes, node->nid);
+	/* If the node is a bridge for other nodes, there are possibly
+	 * multiple entries pointing to our released node, delete them all.
+	 */
+	radix_tree_for_each_slot(slot, &qrtr_nodes, &iter, 0) {
+		if (*slot == node)
+			radix_tree_iter_delete(&qrtr_nodes, &iter, slot);
+	}
 	spin_unlock_irqrestore(&qrtr_nodes_lock, flags);
 
 	list_del(&node->item);
@@ -266,7 +271,10 @@ static int qrtr_tx_wait(struct qrtr_node *node, int dest_node, int dest_port,
 		flow = kzalloc(sizeof(*flow), GFP_KERNEL);
 		if (flow) {
 			init_waitqueue_head(&flow->resume_tx);
-			radix_tree_insert(&node->qrtr_tx_flow, key, flow);
+			if (radix_tree_insert(&node->qrtr_tx_flow, key, flow)) {
+				kfree(flow);
+				flow = NULL;
+			}
 		}
 	}
 	mutex_unlock(&node->qrtr_tx_lock);
@@ -347,7 +355,7 @@ static int qrtr_node_enqueue(struct qrtr_node *node, struct sk_buff *skb,
 	hdr->src_port_id = cpu_to_le32(from->sq_port);
 	if (to->sq_port == QRTR_PORT_CTRL) {
 		hdr->dst_node_id = cpu_to_le32(node->nid);
-		hdr->dst_port_id = cpu_to_le32(QRTR_NODE_BCAST);
+		hdr->dst_port_id = cpu_to_le32(QRTR_PORT_CTRL);
 	} else {
 		hdr->dst_node_id = cpu_to_le32(to->sq_node);
 		hdr->dst_port_id = cpu_to_le32(to->sq_port);
@@ -401,12 +409,13 @@ static void qrtr_node_assign(struct qrtr_node *node, unsigned int nid)
 {
 	unsigned long flags;
 
-	if (node->nid != QRTR_EP_NID_AUTO || nid == QRTR_EP_NID_AUTO)
+	if (nid == QRTR_EP_NID_AUTO)
 		return;
 
 	spin_lock_irqsave(&qrtr_nodes_lock, flags);
 	radix_tree_insert(&qrtr_nodes, nid, node);
-	node->nid = nid;
+	if (node->nid == QRTR_EP_NID_AUTO)
+		node->nid = nid;
 	spin_unlock_irqrestore(&qrtr_nodes_lock, flags);
 }
 
@@ -433,7 +442,7 @@ int qrtr_endpoint_post(struct qrtr_endpoint *ep, const void *data, size_t len)
 	if (len == 0 || len & 3)
 		return -EINVAL;
 
-	skb = netdev_alloc_skb(NULL, len);
+	skb = __netdev_alloc_skb(NULL, len, GFP_ATOMIC | __GFP_NOWARN);
 	if (!skb)
 		return -ENOMEM;
 
@@ -494,6 +503,13 @@ int qrtr_endpoint_post(struct qrtr_endpoint *ep, const void *data, size_t len)
 
 	qrtr_node_assign(node, cb->src_node);
 
+	if (cb->type == QRTR_TYPE_NEW_SERVER) {
+		/* Remote node endpoint can bridge other distant nodes */
+		const struct qrtr_ctrl_pkt *pkt = data + hdrlen;
+
+		qrtr_node_assign(node, le32_to_cpu(pkt->server.node));
+	}
+
 	if (cb->type == QRTR_TYPE_RESUME_TX) {
 		qrtr_tx_resume(node, skb);
 	} else {
@@ -519,18 +535,20 @@ EXPORT_SYMBOL_GPL(qrtr_endpoint_post);
 /**
  * qrtr_alloc_ctrl_packet() - allocate control packet skb
  * @pkt: reference to qrtr_ctrl_pkt pointer
+ * @flags: the type of memory to allocate
  *
  * Returns newly allocated sk_buff, or NULL on failure
  *
  * This function allocates a sk_buff large enough to carry a qrtr_ctrl_pkt and
  * on success returns a reference to the control packet in @pkt.
  */
-static struct sk_buff *qrtr_alloc_ctrl_packet(struct qrtr_ctrl_pkt **pkt)
+static struct sk_buff *qrtr_alloc_ctrl_packet(struct qrtr_ctrl_pkt **pkt,
+					      gfp_t flags)
 {
 	const int pkt_len = sizeof(struct qrtr_ctrl_pkt);
 	struct sk_buff *skb;
 
-	skb = alloc_skb(QRTR_HDR_MAX_SIZE + pkt_len, GFP_KERNEL);
+	skb = alloc_skb(QRTR_HDR_MAX_SIZE + pkt_len, flags);
 	if (!skb)
 		return NULL;
 
@@ -592,6 +610,7 @@ void qrtr_endpoint_unregister(struct qrtr_endpoint *ep)
 	struct qrtr_ctrl_pkt *pkt;
 	struct qrtr_tx_flow *flow;
 	struct sk_buff *skb;
+	unsigned long flags;
 	void __rcu **slot;
 
 	mutex_lock(&node->ep_lock);
@@ -599,11 +618,18 @@ void qrtr_endpoint_unregister(struct qrtr_endpoint *ep)
 	mutex_unlock(&node->ep_lock);
 
 	/* Notify the local controller about the event */
-	skb = qrtr_alloc_ctrl_packet(&pkt);
-	if (skb) {
-		pkt->cmd = cpu_to_le32(QRTR_TYPE_BYE);
-		qrtr_local_enqueue(NULL, skb, QRTR_TYPE_BYE, &src, &dst);
+	spin_lock_irqsave(&qrtr_nodes_lock, flags);
+	radix_tree_for_each_slot(slot, &qrtr_nodes, &iter, 0) {
+		if (*slot != node)
+			continue;
+		src.sq_node = iter.index;
+		skb = qrtr_alloc_ctrl_packet(&pkt, GFP_ATOMIC);
+		if (skb) {
+			pkt->cmd = cpu_to_le32(QRTR_TYPE_BYE);
+			qrtr_local_enqueue(NULL, skb, QRTR_TYPE_BYE, &src, &dst);
+		}
 	}
+	spin_unlock_irqrestore(&qrtr_nodes_lock, flags);
 
 	/* Wake up any transmitters waiting for resume-tx from the node */
 	mutex_lock(&node->qrtr_tx_lock);
@@ -656,7 +682,7 @@ static void qrtr_port_remove(struct qrtr_sock *ipc)
 	to.sq_node = QRTR_NODE_BCAST;
 	to.sq_port = QRTR_PORT_CTRL;
 
-	skb = qrtr_alloc_ctrl_packet(&pkt);
+	skb = qrtr_alloc_ctrl_packet(&pkt, GFP_KERNEL);
 	if (skb) {
 		pkt->cmd = cpu_to_le32(QRTR_TYPE_DEL_CLIENT);
 		pkt->client.node = cpu_to_le32(ipc->us.sq_node);
@@ -935,8 +961,10 @@ static int qrtr_sendmsg(struct socket *sock, struct msghdr *msg, size_t len)
 	plen = (len + 3) & ~3;
 	skb = sock_alloc_send_skb(sk, plen + QRTR_HDR_MAX_SIZE,
 				  msg->msg_flags & MSG_DONTWAIT, &rc);
-	if (!skb)
+	if (!skb) {
+		rc = -ENOMEM;
 		goto out_node;
+	}
 
 	skb_reserve(skb, QRTR_HDR_MAX_SIZE);
 
@@ -982,7 +1010,7 @@ static int qrtr_send_resume_tx(struct qrtr_cb *cb)
 	if (!node)
 		return -EINVAL;
 
-	skb = qrtr_alloc_ctrl_packet(&pkt);
+	skb = qrtr_alloc_ctrl_packet(&pkt, GFP_KERNEL);
 	if (!skb)
 		return -ENOMEM;
 
@@ -1033,6 +1061,11 @@ static int qrtr_recvmsg(struct socket *sock, struct msghdr *msg,
 	rc = copied;
 
 	if (addr) {
+		/* There is an anonymous 2-byte hole after sq_family,
+		 * make sure to clear it.
+		 */
+		memset(addr, 0, sizeof(*addr));
+
 		addr->sq_family = AF_QIPCRTR;
 		addr->sq_node = cb->src_node;
 		addr->sq_port = cb->src_port;
@@ -1264,13 +1297,19 @@ static int __init qrtr_proto_init(void)
 		return rc;
 
 	rc = sock_register(&qrtr_family);
-	if (rc) {
-		proto_unregister(&qrtr_proto);
-		return rc;
-	}
+	if (rc)
+		goto err_proto;
 
-	qrtr_ns_init();
+	rc = qrtr_ns_init();
+	if (rc)
+		goto err_sock;
 
+	return 0;
+
+err_sock:
+	sock_unregister(qrtr_family.family);
+err_proto:
+	proto_unregister(&qrtr_proto);
 	return rc;
 }
 postcore_initcall(qrtr_proto_init);

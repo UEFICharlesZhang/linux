@@ -942,6 +942,8 @@ int icc_link_destroy(struct icc_node *src, struct icc_node *dst)
 		       GFP_KERNEL);
 	if (new)
 		src->links = new;
+	else
+		ret = -ENOMEM;
 
 out:
 	mutex_unlock(&icc_lock);
@@ -1083,7 +1085,6 @@ static int of_count_icc_providers(struct device_node *np)
 			count++;
 		count += of_count_icc_providers(child);
 	}
-	of_node_put(np);
 
 	return count;
 }

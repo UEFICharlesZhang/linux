@@ -220,6 +220,7 @@ struct vhost_scsi_tmf {
 	struct list_head queue_entry;
 
 	struct se_cmd se_cmd;
+	u8 scsi_resp;
 	struct vhost_scsi_inflight *inflight;
 	struct iovec resp_iov;
 	int in_iovs;
@@ -426,6 +427,7 @@ static void vhost_scsi_queue_tm_rsp(struct se_cmd *se_cmd)
 	struct vhost_scsi_tmf *tmf = container_of(se_cmd, struct vhost_scsi_tmf,
 						  se_cmd);
 
+	tmf->scsi_resp = se_cmd->se_tmr_req->response;
 	transport_generic_free_cmd(&tmf->se_cmd, 0);
 }
 
@@ -1183,7 +1185,7 @@ static void vhost_scsi_tmf_resp_work(struct vhost_work *work)
 						  vwork);
 	int resp_code;
 
-	if (tmf->se_cmd.se_tmr_req->response == TMR_FUNCTION_COMPLETE)
+	if (tmf->scsi_resp == TMR_FUNCTION_COMPLETE)
 		resp_code = VIRTIO_SCSI_S_FUNCTION_SUCCEEDED;
 	else
 		resp_code = VIRTIO_SCSI_S_FUNCTION_REJECTED;
@@ -1641,7 +1643,8 @@ vhost_scsi_set_endpoint(struct vhost_scsi *vs,
 			if (!vhost_vq_is_setup(vq))
 				continue;
 
-			if (vhost_scsi_setup_vq_cmds(vq, vq->num))
+			ret = vhost_scsi_setup_vq_cmds(vq, vq->num);
+			if (ret)
 				goto destroy_vq_cmds;
 		}
 
@@ -1811,12 +1814,9 @@ static int vhost_scsi_open(struct inode *inode, struct file *f)
 	struct vhost_virtqueue **vqs;
 	int r = -ENOMEM, i;
 
-	vs = kzalloc(sizeof(*vs), GFP_KERNEL | __GFP_NOWARN | __GFP_RETRY_MAYFAIL);
-	if (!vs) {
-		vs = vzalloc(sizeof(*vs));
-		if (!vs)
-			goto err_vs;
-	}
+	vs = kvzalloc(sizeof(*vs), GFP_KERNEL);
+	if (!vs)
+		goto err_vs;
 
 	vqs = kmalloc_array(VHOST_SCSI_MAX_VQ, sizeof(*vqs), GFP_KERNEL);
 	if (!vqs)

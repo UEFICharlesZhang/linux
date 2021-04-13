@@ -1031,7 +1031,6 @@ static int hvfb_getmem(struct hv_device *hdev, struct fb_info *info)
 			PCI_DEVICE_ID_HYPERV_VIDEO, NULL);
 		if (!pdev) {
 			pr_err("Unable to find PCI Hyper-V video\n");
-			kfree(info->apertures);
 			return -ENODEV;
 		}
 
@@ -1093,7 +1092,12 @@ static int hvfb_getmem(struct hv_device *hdev, struct fb_info *info)
 		goto err1;
 	}
 
-	fb_virt = ioremap(par->mem->start, screen_fb_size);
+	/*
+	 * Map the VRAM cacheable for performance. This is also required for
+	 * VM Connect to display properly for ARM64 Linux VM, as the host also
+	 * maps the VRAM cacheable.
+	 */
+	fb_virt = ioremap_cache(par->mem->start, screen_fb_size);
 	if (!fb_virt)
 		goto err2;
 
@@ -1124,7 +1128,6 @@ getmem_done:
 	} else {
 		pci_dev_put(pdev);
 	}
-	kfree(info->apertures);
 
 	return 0;
 
@@ -1136,7 +1139,6 @@ err2:
 err1:
 	if (!gen2vm)
 		pci_dev_put(pdev);
-	kfree(info->apertures);
 
 	return -ENOMEM;
 }

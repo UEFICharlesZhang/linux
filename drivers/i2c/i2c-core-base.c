@@ -378,7 +378,7 @@ static int i2c_gpio_init_recovery(struct i2c_adapter *adap)
 static int i2c_init_recovery(struct i2c_adapter *adap)
 {
 	struct i2c_bus_recovery_info *bri = adap->bus_recovery_info;
-	char *err_str;
+	char *err_str, *err_level = KERN_ERR;
 
 	if (!bri)
 		return 0;
@@ -387,7 +387,8 @@ static int i2c_init_recovery(struct i2c_adapter *adap)
 		return -EPROBE_DEFER;
 
 	if (!bri->recover_bus) {
-		err_str = "no recover_bus() found";
+		err_str = "no suitable method provided";
+		err_level = KERN_DEBUG;
 		goto err;
 	}
 
@@ -414,7 +415,7 @@ static int i2c_init_recovery(struct i2c_adapter *adap)
 
 	return 0;
  err:
-	dev_err(&adap->dev, "Not using recovery: %s\n", err_str);
+	dev_printk(err_level, &adap->dev, "Not using recovery: %s\n", err_str);
 	adap->bus_recovery_info = NULL;
 
 	return -EINVAL;
@@ -549,17 +550,18 @@ put_sync_adapter:
 
 static int i2c_device_remove(struct device *dev)
 {
-	struct i2c_client	*client = i2c_verify_client(dev);
+	struct i2c_client	*client = to_i2c_client(dev);
 	struct i2c_driver	*driver;
-	int status = 0;
-
-	if (!client || !dev->driver)
-		return 0;
 
 	driver = to_i2c_driver(dev->driver);
 	if (driver->remove) {
+		int status;
+
 		dev_dbg(dev, "remove\n");
+
 		status = driver->remove(client);
+		if (status)
+			dev_warn(dev, "remove failed (%pe), will be ignored\n", ERR_PTR(status));
 	}
 
 	dev_pm_domain_detach(&client->dev, true);
@@ -571,7 +573,8 @@ static int i2c_device_remove(struct device *dev)
 	if (client->flags & I2C_CLIENT_HOST_NOTIFY)
 		pm_runtime_put(&client->adapter->dev);
 
-	return status;
+	/* return always 0 because there is WIP to make remove-functions void */
+	return 0;
 }
 
 static void i2c_device_shutdown(struct device *dev)
